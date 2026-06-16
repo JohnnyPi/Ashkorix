@@ -1,0 +1,4 @@
+[env]
+LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"
+CMAKE_GENERATOR = "Visual Studio 17 2022"
+ASHKORIX_DATA_DIR = { value = "../Data", relative = true }

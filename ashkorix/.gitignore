@@ -1,0 +1,11 @@
+/target/
+**/node_modules/
+**/dist/
+.DS_Store
+*.gguf
+.env
+
+# Runtime data at workspace root (keep README + .gitkeep)
+../Data/**
+!../Data/README.md
+!../Data/**/.gitkeep
