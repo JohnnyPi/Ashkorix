@@ -1,9 +1,11 @@
 use crate::state::AppStateWrapper;
 use ashkorix_core::app::{AppState as CoreState, DoctorReport};
 use ashkorix_core::config::{AshkorixConfig, GenerationConfig, ModelFileInfo};
+use ashkorix_core::CudaStatus;
 use ashkorix_core::documents::registry::ImporterInfo;
 use ashkorix_core::documents::types::{Document, ImportResult};
-use ashkorix_core::rag::types::{RagAnswer, RankedChunk, RetrievalFilters, RetrievalMode};
+use ashkorix_core::rag::answer::RagAnswerService;
+use ashkorix_core::rag::types::{RagAnswer, RankedChunk, RetrievalFilters, RetrievalMode, UnsupportedClaim};
 use ashkorix_core::search::indexer::IndexHealth;
 use ashkorix_core::traits::model::{LoadOptions, ModelInfo};
 use futures::StreamExt;
@@ -16,6 +18,12 @@ pub struct TokenPayload {
     pub token: String,
     pub finished: bool,
     pub tokens_generated: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citations: Option<Vec<ashkorix_core::cite::types::Citation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncited_warning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_claims: Option<Vec<UnsupportedClaim>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +49,11 @@ pub async fn open_data_folder(
 #[tauri::command]
 pub async fn get_version() -> Result<String, String> {
     Ok(CoreState::version().to_string())
+}
+
+#[tauri::command]
+pub async fn get_cuda_status() -> Result<CudaStatus, String> {
+    Ok(ashkorix_core::cuda_status())
 }
 
 #[tauri::command]
@@ -91,6 +104,7 @@ pub async fn chat_stream_start(
     message: String,
 ) -> Result<(), String> {
     let gen = state.0.lock().await.config.generation.clone();
+    let state_arc = state.0.clone();
     let mut stream = state
         .0
         .lock()
@@ -100,15 +114,20 @@ pub async fn chat_stream_start(
         .map_err(|e| e.to_string())?;
 
     tokio::spawn(async move {
+        let mut assistant = String::new();
         while let Some(event) = stream.next().await {
             match event {
                 Ok(ev) => {
+                    assistant.push_str(&ev.token);
                     let _ = app.emit(
                         "token",
                         TokenPayload {
                             token: ev.token,
                             finished: ev.finished,
                             tokens_generated: ev.tokens_generated,
+                            citations: None,
+                            uncited_warning: None,
+                            unsupported_claims: None,
                         },
                     );
                     if ev.finished {
@@ -122,12 +141,19 @@ pub async fn chat_stream_start(
                             token: format!("[error: {e}]"),
                             finished: true,
                             tokens_generated: 0,
+                            citations: None,
+                            uncited_warning: None,
+                            unsupported_claims: None,
                         },
                     );
                     break;
                 }
             }
         }
+        state_arc
+            .lock()
+            .await
+            .append_assistant_message(assistant);
     });
     Ok(())
 }
@@ -167,36 +193,127 @@ pub async fn list_importers() -> Result<Vec<ImporterInfo>, String> {
 }
 
 #[tauri::command]
+pub async fn rag_stream_start(
+    app: AppHandle,
+    state: State<'_, AppStateWrapper>,
+    question: String,
+    mode: String,
+) -> Result<(), String> {
+    let gen = state.0.lock().await.config.generation.clone();
+    let (mut stream, meta) = state
+        .0
+        .lock()
+        .await
+        .rag_stream(
+            question,
+            RetrievalMode::from_str(&mode),
+            gen,
+            vec![],
+            RetrievalFilters::default(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let citations = meta.citations;
+    let retrieved_chunks = meta.retrieved_chunks;
+    let state_arc = state.0.clone();
+    tokio::spawn(async move {
+        let mut assistant = String::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(ev) => {
+                    assistant.push_str(&ev.token);
+                    let payload = TokenPayload {
+                        token: ev.token,
+                        finished: ev.finished,
+                        tokens_generated: ev.tokens_generated,
+                        citations: None,
+                        uncited_warning: None,
+                        unsupported_claims: None,
+                    };
+                    let _ = app.emit("token", payload);
+                    if ev.finished {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "token",
+                        TokenPayload {
+                            token: format!("[error: {e}]"),
+                            finished: true,
+                            tokens_generated: 0,
+                            citations: None,
+                            uncited_warning: None,
+                            unsupported_claims: None,
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+
+        let verification = {
+            let memories = state_arc.lock().await.last_injected_memories();
+            RagAnswerService::verify_response(
+                &assistant,
+                &citations,
+                &retrieved_chunks,
+                &memories,
+            )
+        };
+
+        let _ = app.emit(
+            "token",
+            TokenPayload {
+                token: String::new(),
+                finished: true,
+                tokens_generated: 0,
+                citations: Some(verification.resolved_citations),
+                uncited_warning: Some(verification.uncited_warning),
+                unsupported_claims: if verification.unsupported_claims.is_empty() {
+                    None
+                } else {
+                    Some(verification.unsupported_claims)
+                },
+            },
+        );
+
+        state_arc
+            .lock()
+            .await
+            .append_assistant_message(assistant);
+    });
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn import_files(
     app: AppHandle,
     state: State<'_, AppStateWrapper>,
     paths: Vec<PathBuf>,
 ) -> Result<Vec<ImportResult>, String> {
-    let mut results = Vec::new();
-    for path in paths {
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let result = state
-            .0
-            .lock()
-            .await
-            .import_files(vec![path])
-            .await
-            .map_err(|e| e.to_string())?;
-        for r in &result {
-            let _ = app.emit(
-                "import_progress",
-                ImportProgressPayload {
-                    filename: filename.clone(),
-                    status: format!("{:?}", r.status),
-                    message: r.message.clone(),
-                },
-            );
-        }
-        results.extend(result);
+    let results = state
+        .0
+        .lock()
+        .await
+        .import_files(paths)
+        .await
+        .map_err(|e| e.to_string())?;
+    for r in &results {
+        let filename = r
+            .document
+            .as_ref()
+            .map(|d| d.original_filename.clone())
+            .unwrap_or_else(|| "unknown".into());
+        let _ = app.emit(
+            "import_progress",
+            ImportProgressPayload {
+                filename,
+                status: format!("{:?}", r.status),
+                message: r.message.clone(),
+            },
+        );
     }
     Ok(results)
 }
@@ -218,6 +335,7 @@ pub async fn delete_document(state: State<'_, AppStateWrapper>, id: String) -> R
         .lock()
         .await
         .delete_document(&id)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -330,4 +448,143 @@ pub async fn save_conversation(state: State<'_, AppStateWrapper>) -> Result<Conv
         messages: state.0.lock().await.get_conversation(),
         exported_at: chrono::Utc::now().to_rfc3339(),
     })
+}
+
+#[tauri::command]
+pub async fn list_memories(
+    state: State<'_, AppStateWrapper>,
+    scope_filter: Option<String>,
+) -> Result<Vec<ashkorix_core::memory::Memory>, String> {
+    state
+        .0
+        .lock()
+        .await
+        .list_memories(scope_filter.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn search_memories(
+    state: State<'_, AppStateWrapper>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<ashkorix_core::memory::Memory>, String> {
+    state
+        .0
+        .lock()
+        .await
+        .search_memories(&query, limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_memory_candidates(
+    state: State<'_, AppStateWrapper>,
+) -> Result<Vec<ashkorix_core::memory::MemoryCandidate>, String> {
+    state
+        .0
+        .lock()
+        .await
+        .list_memory_candidates()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn approve_memory_candidate(
+    state: State<'_, AppStateWrapper>,
+    id: String,
+) -> Result<ashkorix_core::memory::Memory, String> {
+    state
+        .0
+        .lock()
+        .await
+        .approve_memory_candidate(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reject_memory_candidate(
+    state: State<'_, AppStateWrapper>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .0
+        .lock()
+        .await
+        .reject_memory_candidate(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn edit_and_approve_candidate(
+    state: State<'_, AppStateWrapper>,
+    id: String,
+    edit: ashkorix_core::memory::EditCandidateInput,
+) -> Result<ashkorix_core::memory::Memory, String> {
+    state
+        .0
+        .lock()
+        .await
+        .edit_and_approve_candidate(&id, edit)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn create_memory(
+    state: State<'_, AppStateWrapper>,
+    input: ashkorix_core::memory::CreateMemoryInput,
+) -> Result<ashkorix_core::memory::Memory, String> {
+    state
+        .0
+        .lock()
+        .await
+        .create_memory(input)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_memory(
+    state: State<'_, AppStateWrapper>,
+    id: String,
+    input: ashkorix_core::memory::UpdateMemoryInput,
+) -> Result<ashkorix_core::memory::Memory, String> {
+    state
+        .0
+        .lock()
+        .await
+        .update_memory(&id, input)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn deactivate_memory(
+    state: State<'_, AppStateWrapper>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .0
+        .lock()
+        .await
+        .deactivate_memory(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn extract_memory_candidates(
+    state: State<'_, AppStateWrapper>,
+) -> Result<Vec<ashkorix_core::memory::MemoryCandidate>, String> {
+    state
+        .0
+        .lock()
+        .await
+        .extract_memory_candidates()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_last_injected_memories(
+    state: State<'_, AppStateWrapper>,
+) -> Result<Vec<ashkorix_core::memory::Memory>, String> {
+    Ok(state.0.lock().await.last_injected_memories())
 }

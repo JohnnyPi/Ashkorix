@@ -63,6 +63,7 @@ fn extract_keyword_query(query: &str) -> Option<String> {
         }
     }
     for pattern in [
+        r"(?i)\bphase\s+\d+\b",
         r"\bfield\s+\d+\b",
         r"\bField\s+\d+\b",
         r"\berror\s+\d+\b",
@@ -124,4 +125,15 @@ fn decompose_subquestions(query: &str) -> Vec<String> {
         subs.push(format!("Where is {query} documented?"));
     }
     subs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyword_query_includes_phase_number() {
+        let kw = extract_keyword_query("What is Phase 1?").expect("keywords");
+        assert!(kw.to_lowercase().contains("phase 1"));
+    }
 }

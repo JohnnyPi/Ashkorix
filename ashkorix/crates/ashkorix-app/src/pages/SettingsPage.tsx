@@ -230,7 +230,8 @@ export function SettingsPage() {
           Save config
         </button>
         <p className="muted" style={{ marginTop: "0.5rem", fontSize: "0.85rem" }}>
-          Saving reloads the embedding model. Then rebuild the index on the Documents page.
+          Saving reloads the embedding model (and reranker if set). Then rebuild the index on the
+          Documents page.
         </p>
       </div>
 
@@ -263,11 +264,90 @@ export function SettingsPage() {
             </label>
           ))}
         </div>
+        <p className="muted" style={{ marginTop: "0.5rem", fontSize: "0.85rem" }}>
+          `gpu_layers = 0` auto-detects CUDA and offloads all layers when a compatible GPU is found;
+          set a positive value to override.
+        </p>
         <div className="row" style={{ marginTop: "0.75rem" }}>
           <button type="button" className="btn btn-primary" onClick={saveGen}>
             Save generation settings
           </button>
         </div>
+      </div>
+
+      <div className="panel">
+        <h3>Memory</h3>
+        <div className="form-grid">
+          <label className="muted">
+            <input
+              type="checkbox"
+              checked={config.memory.enabled}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  memory: { ...config.memory, enabled: e.target.checked },
+                })
+              }
+            />{" "}
+            Enable memory retrieval
+          </label>
+          <label className="muted">
+            Active project
+            <input
+              className="input"
+              list="project-presets"
+              value={config.memory.active_project}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  memory: { ...config.memory, active_project: e.target.value },
+                })
+              }
+            />
+            <datalist id="project-presets">
+              <option value="ashkorix" />
+              <option value="khoraxis" />
+              <option value="morrowind-tool" />
+              <option value="horror-novel" />
+            </datalist>
+          </label>
+          <label className="muted">
+            Max injected memories
+            <input
+              type="number"
+              className="input"
+              min={3}
+              max={8}
+              value={config.memory.max_injected}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  memory: { ...config.memory, max_injected: Number(e.target.value) },
+                })
+              }
+            />
+          </label>
+          <label className="muted">
+            Min confidence
+            <input
+              type="number"
+              className="input"
+              min={0}
+              max={1}
+              step={0.05}
+              value={config.memory.min_confidence}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  memory: { ...config.memory, min_confidence: Number(e.target.value) },
+                })
+              }
+            />
+          </label>
+        </div>
+        <p className="muted">
+          Scope: global, project:{config.memory.active_project}, and current conversation.
+        </p>
       </div>
 
       <div className="panel">

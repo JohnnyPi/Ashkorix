@@ -1,22 +1,25 @@
-import { NavLink, Outlet } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { NavLink } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { PageId } from "../types";
-
-const NAV: { id: PageId; label: string; path: string }[] = [
-  { id: "chat", label: "Chat", path: "/" },
-  { id: "models", label: "Models", path: "/models" },
-  { id: "documents", label: "Documents", path: "/documents" },
-  { id: "search", label: "Search", path: "/search" },
-  { id: "settings", label: "Settings", path: "/settings" },
-];
+import { APP_PAGES } from "../routes";
+import { KeepAlivePages } from "./KeepAlivePages";
 
 export function Layout() {
   const [version, setVersion] = useState("…");
+  const [inboxCount, setInboxCount] = useState(0);
+  const [cudaAvailable, setCudaAvailable] = useState(false);
+
+  const loadInboxCount = useCallback(() => {
+    api.listMemoryCandidates().then((c) => setInboxCount(c.length)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.getVersion().then(setVersion).catch(() => setVersion("unknown"));
-  }, []);
+    api.getCudaStatus().then((s) => setCudaAvailable(s.available)).catch(() => setCudaAvailable(false));
+    loadInboxCount();
+    const interval = setInterval(loadInboxCount, 30000);
+    return () => clearInterval(interval);
+  }, [loadInboxCount]);
 
   return (
     <div className="app-shell">
@@ -24,9 +27,19 @@ export function Layout() {
         <div className="brand-inline">
           <h1>Ashkorix</h1>
           <span>v{version} · local only</span>
+          <span
+            className={`cuda-status${cudaAvailable ? " cuda-on" : " cuda-off"}`}
+            title={
+              cudaAvailable
+                ? "CUDA GPU detected — models offload to GPU automatically"
+                : "No CUDA GPU — inference uses CPU"
+            }
+          >
+            {cudaAvailable ? "CUDA ON" : "CUDA OFF"}
+          </span>
         </div>
         <nav className="header-nav">
-          {NAV.map((item) => (
+          {APP_PAGES.map((item) => (
             <NavLink
               key={item.id}
               to={item.path}
@@ -34,6 +47,7 @@ export function Layout() {
               className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
             >
               {item.label}
+              {item.id === "memory" && inboxCount > 0 ? ` (${inboxCount})` : ""}
             </NavLink>
           ))}
         </nav>
@@ -42,7 +56,7 @@ export function Layout() {
         </button>
       </header>
       <main className="page-content">
-        <Outlet />
+        <KeepAlivePages />
       </main>
     </div>
   );

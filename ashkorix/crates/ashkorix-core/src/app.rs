@@ -1,6 +1,7 @@
 use crate::chunking::HeadingHierarchyChunker;
 use crate::config::{
-    resolve_embedding_model_path, AshkorixConfig, GenerationConfig, ModelFileInfo,
+    resolve_embedding_model_path, resolve_reranker_model_path, AshkorixConfig, GenerationConfig,
+    ModelFileInfo,
 };
 use crate::documents::registry::{dedup_result, ImporterRegistry};
 use crate::documents::storage::DocumentStore;
@@ -8,29 +9,41 @@ use crate::documents::types::{Document, ImportResult, ImportStatus};
 use crate::embeddings::LlamaEmbeddingService;
 use crate::error::Result;
 use crate::llm::LlamaModelService;
+use crate::memory::{
+    augment_last_user_message, build_chat_memory_system_prompt, build_extraction_prompt,
+    instant_text_stream, parse_extraction_response, try_direct_memory_answer, CreateMemoryInput,
+    EditCandidateInput, Memory, MemoryCandidate, MemoryRetriever, MemoryStore, UpdateMemoryInput,
+};
 use crate::pool::POOL_ID;
 use crate::rag::answer::RagAnswerService;
 use crate::rag::types::{RagAnswer, RetrievalFilters, RetrievalMode};
 use crate::rag::HybridRetrievalService;
+use crate::rerank::LlamaRerankerService;
 use crate::search::indexer::{IndexHealth, PoolIndexer};
 use crate::traits::model::{ChatMessage, GenerateParams, LoadOptions, ModelInfo, TokenEvent};
 use crate::traits::{EmbeddingService, ModelService, RetrievalService};
 use futures::Stream;
+use futures::StreamExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
+use uuid::Uuid;
 
 pub struct AppState {
     pub config: AshkorixConfig,
     pub store: Arc<DocumentStore>,
-    pub model: Arc<Mutex<LlamaModelService>>,
-    pub embedding: Arc<Mutex<LlamaEmbeddingService>>,
+    pub memory: Arc<MemoryStore>,
+    pub model: Arc<AsyncMutex<LlamaModelService>>,
+    pub embedding: Arc<AsyncMutex<LlamaEmbeddingService>>,
+    pub reranker: Arc<AsyncMutex<LlamaRerankerService>>,
     pub importers: ImporterRegistry,
-    pub retrieval: HybridRetrievalService,
+    pub indexer: Arc<PoolIndexer>,
+    pub retrieval: Arc<HybridRetrievalService>,
     pub rag: RagAnswerService,
-    pub indexer: PoolIndexer,
     chunker: HeadingHierarchyChunker,
+    session_id: Mutex<String>,
+    last_injected_memories: Mutex<Vec<Memory>>,
 }
 
 impl AppState {
@@ -39,59 +52,69 @@ impl AppState {
         let _ = crate::config::init_logging(&config);
         let db_path = config.data_dir.join("ashkorix.db");
         let store = Arc::new(DocumentStore::open(&db_path)?);
-        let model = Arc::new(Mutex::new(LlamaModelService::new()?));
-        let embedding = Arc::new(Mutex::new(LlamaEmbeddingService::new()?));
+        let memory = Arc::new(MemoryStore::open(&db_path)?);
+        memory.seed_if_empty()?;
+        let model = Arc::new(AsyncMutex::new(LlamaModelService::new()?));
+        let embedding = Arc::new(AsyncMutex::new(LlamaEmbeddingService::new()?));
+        let reranker = Arc::new(AsyncMutex::new(LlamaRerankerService::new(
+            i32::try_from(config.generation.threads).unwrap_or(4),
+        )?));
         let importers = ImporterRegistry::builtin();
-        let retrieval = HybridRetrievalService::new(
+        let indexer = Arc::new(PoolIndexer::new(
             config.clone(),
             store.clone(),
             embedding.clone(),
-        );
-        let indexer = PoolIndexer::new(config.clone(), store.clone(), embedding.clone());
-        let rag = RagAnswerService::new(
-            HybridRetrievalService::new(config.clone(), store.clone(), embedding.clone()),
-            model.clone(),
-        );
+        ));
+        let retrieval = Arc::new(HybridRetrievalService::new(
+            config.clone(),
+            store.clone(),
+            embedding.clone(),
+            indexer.clone(),
+            reranker.clone(),
+        ));
+        let rag = RagAnswerService::new(retrieval.clone(), model.clone());
         let chunker = HeadingHierarchyChunker::new(config.chunking.clone());
 
         let mut state = Self {
             config,
             store,
+            memory,
             model,
             embedding,
+            reranker,
             importers,
+            indexer,
             retrieval,
             rag,
-            indexer,
             chunker,
+            session_id: Mutex::new(new_session_id()),
+            last_injected_memories: Mutex::new(Vec::new()),
         };
 
         if let Err(e) = futures::executor::block_on(state.reload_embedding_from_config()) {
             tracing::warn!("embedding model not loaded at startup: {e}");
+        }
+        if let Err(e) = futures::executor::block_on(state.reload_reranker_from_config()) {
+            tracing::warn!("reranker model not loaded at startup: {e}");
         }
 
         Ok(state)
     }
 
     fn refresh_retrieval_services(&mut self) {
-        self.indexer = PoolIndexer::new(
+        self.indexer = Arc::new(PoolIndexer::new(
             self.config.clone(),
             self.store.clone(),
             self.embedding.clone(),
-        );
-        self.retrieval = HybridRetrievalService::new(
+        ));
+        self.retrieval = Arc::new(HybridRetrievalService::new(
             self.config.clone(),
             self.store.clone(),
             self.embedding.clone(),
-        );
-        self.rag = RagAnswerService::new(
-            HybridRetrievalService::new(
-                self.config.clone(),
-                self.store.clone(),
-                self.embedding.clone(),
-            ),
-            self.model.clone(),
-        );
+            self.indexer.clone(),
+            self.reranker.clone(),
+        ));
+        self.rag = RagAnswerService::new(self.retrieval.clone(), self.model.clone());
     }
 
     pub async fn reload_embedding_from_config(&mut self) -> Result<()> {
@@ -109,6 +132,25 @@ impl AppState {
         self.embedding.lock().await.load(&path).await?;
         self.config.embedding_model_path = Some(path);
         self.config.save()?;
+        Ok(())
+    }
+
+    pub async fn reload_reranker_from_config(&mut self) -> Result<()> {
+        let path = resolve_reranker_model_path(
+            self.config.reranker_model_path.as_deref(),
+            &self.config.models_dir,
+        );
+
+        match path {
+            Some(path) => {
+                self.reranker.lock().await.load(&path).await?;
+                self.config.reranker_model_path = Some(path);
+                self.config.save()?;
+            }
+            None => {
+                self.reranker.lock().await.unload();
+            }
+        }
         Ok(())
     }
 
@@ -132,17 +174,93 @@ impl AppState {
         futures::executor::block_on(async { self.model.lock().await.is_loaded() })
     }
 
+    pub fn session_id(&self) -> String {
+        self.session_id.lock().unwrap().clone()
+    }
+
+    pub fn last_injected_memories(&self) -> Vec<Memory> {
+        self.last_injected_memories.lock().unwrap().clone()
+    }
+
+    fn set_last_injected_memories(&self, memories: Vec<Memory>) {
+        *self.last_injected_memories.lock().unwrap() = memories;
+    }
+
+    fn new_session(&self) {
+        *self.session_id.lock().unwrap() = new_session_id();
+    }
+
+    pub async fn retrieve_memories(&self, query: &str) -> Result<Vec<Memory>> {
+        let memories = MemoryRetriever::retrieve(
+            &self.memory,
+            &self.store,
+            self.embedding.clone(),
+            &self.config.memory,
+            &self.session_id(),
+            query,
+        )
+        .await?;
+        self.set_last_injected_memories(memories.clone());
+        Ok(memories)
+    }
+
+    pub fn append_assistant_message(&self, content: String) {
+        if content.is_empty() {
+            return;
+        }
+        futures::executor::block_on(async {
+            self.model.lock().await.add_message(ChatMessage {
+                role: "assistant".into(),
+                content,
+            });
+        });
+    }
+
+    pub fn append_user_message(&self, content: String) {
+        futures::executor::block_on(async {
+            self.model.lock().await.add_message(ChatMessage {
+                role: "user".into(),
+                content,
+            });
+        });
+    }
+
     pub async fn chat_stream(
         &self,
         message: String,
         gen: GenerationConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<TokenEvent>> + Send>>> {
+        let memories = self.retrieve_memories(&message).await?;
+
+        if let Some(answer) = try_direct_memory_answer(&message, &memories) {
+            let model = self.model.lock().await;
+            model.add_message(ChatMessage {
+                role: "user".into(),
+                content: message,
+            });
+            return Ok(instant_text_stream(answer));
+        }
+
+        let memory_block = build_chat_memory_system_prompt(&memories);
+
         let mut model = self.model.lock().await;
         model.add_message(ChatMessage {
             role: "user".into(),
             content: message,
         });
-        let prompt = model.format_conversation()?;
+
+        let mut messages = model.conversation();
+        if !memory_block.is_empty() {
+            messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".into(),
+                    content: memory_block,
+                },
+            );
+            augment_last_user_message(&mut messages, &memories);
+        }
+        let prompt = model.format_messages(&messages)?;
         model.generate_stream(GenerateParams {
             prompt,
             temperature: gen.temperature,
@@ -155,6 +273,43 @@ impl AppState {
         })
     }
 
+    pub async fn rag_stream(
+        &self,
+        question: String,
+        mode: RetrievalMode,
+        gen: GenerationConfig,
+        exclude: Vec<String>,
+        filters: RetrievalFilters,
+    ) -> Result<(
+        Pin<Box<dyn Stream<Item = Result<TokenEvent>> + Send>>,
+        crate::rag::answer::RagStreamMeta,
+    )> {
+        let memories = self.retrieve_memories(&question).await?;
+
+        self.append_user_message(question.clone());
+        let conversation = self.get_conversation();
+        self.rag
+            .stream_answer(
+                &question,
+                mode,
+                GenerateParams {
+                    prompt: String::new(),
+                    temperature: gen.temperature,
+                    top_p: gen.top_p,
+                    top_k: gen.top_k,
+                    repeat_penalty: gen.repeat_penalty,
+                    max_tokens: gen.max_tokens,
+                    seed: gen.seed,
+                    stop_sequences: gen.stop_sequences,
+                },
+                &exclude,
+                &conversation,
+                &filters,
+                &memories,
+            )
+            .await
+    }
+
     pub async fn cancel_generation(&self) {
         self.model.lock().await.cancel();
     }
@@ -163,6 +318,8 @@ impl AppState {
         futures::executor::block_on(async {
             self.model.lock().await.clear_conversation();
         });
+        self.new_session();
+        self.set_last_injected_memories(Vec::new());
     }
 
     pub fn get_conversation(&self) -> Vec<ChatMessage> {
@@ -221,8 +378,19 @@ impl AppState {
         self.store.list_documents()
     }
 
-    pub fn delete_document(&self, id: &str) -> Result<()> {
-        self.store.delete_document(id)
+    pub async fn delete_document(&self, id: &str) -> Result<()> {
+        let chunk_ids: Vec<String> = self
+            .store
+            .list_chunks_for_document(id)?
+            .into_iter()
+            .map(|c| c.id.0)
+            .collect();
+        let dim = self.embedding.lock().await.dimension();
+        if dim > 0 && !chunk_ids.is_empty() {
+            self.indexer.remove_chunks(&chunk_ids, dim)?;
+        }
+        self.store.delete_document(id)?;
+        Ok(())
     }
 
     pub async fn build_index(&mut self) -> Result<IndexHealth> {
@@ -263,6 +431,7 @@ impl AppState {
         exclude: Vec<String>,
         filters: RetrievalFilters,
     ) -> Result<RagAnswer> {
+        let memories = self.retrieve_memories(question).await?;
         let conversation = self.get_conversation();
         self.rag
             .ask(
@@ -281,6 +450,7 @@ impl AppState {
                 &exclude,
                 &conversation,
                 &filters,
+                &memories,
             )
             .await
     }
@@ -329,17 +499,49 @@ impl AppState {
                 "not loaded — set a .gguf embedding file in Settings".into()
             },
         });
+        let reranker_ok = futures::executor::block_on(async { self.reranker.lock().await.is_loaded() });
+        let reranker_path = self
+            .config
+            .reranker_model_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(not set — heuristic rerank)".into());
+        checks.push(DoctorCheck {
+            name: "reranker_model".into(),
+            path: reranker_path,
+            ok: self.config.reranker_model_path.is_none() || reranker_ok,
+            message: if self.config.reranker_model_path.is_none() {
+                "not configured — using heuristic rerank".into()
+            } else if reranker_ok {
+                "loaded".into()
+            } else {
+                "configured but not loaded — check path in Settings".into()
+            },
+        });
+        let cuda = crate::llm::cuda_status();
+        checks.push(DoctorCheck {
+            name: "cuda".into(),
+            path: cuda
+                .device_name
+                .clone()
+                .unwrap_or_else(|| "(none)".into()),
+            ok: cuda.available,
+            message: if !cuda.compiled {
+                "CPU-only build (cuda feature not enabled)".into()
+            } else if cuda.available {
+                format!(
+                    "CUDA active — {}",
+                    cuda.device_name.as_deref().unwrap_or("GPU detected")
+                )
+            } else {
+                "CUDA compiled but no compatible GPU found — using CPU".into()
+            },
+        });
         checks.sort_by(|a, b| a.name.cmp(&b.name));
         DoctorReport {
             local_only: self.config.local_only,
             checks,
         }
-    }
-
-    pub async fn load_embedding_model(&mut self, path: PathBuf) -> Result<()> {
-        self.embedding.lock().await.load(&path).await?;
-        self.config.embedding_model_path = Some(path);
-        self.config.save()
     }
 
     pub async fn update_config(&mut self, mut config: AshkorixConfig) -> Result<()> {
@@ -350,7 +552,134 @@ impl AppState {
         if let Err(e) = self.reload_embedding_from_config().await {
             tracing::warn!("embedding model not reloaded after config save: {e}");
         }
+        if let Err(e) = self.reload_reranker_from_config().await {
+            tracing::warn!("reranker model not reloaded after config save: {e}");
+        }
         Ok(())
+    }
+
+    pub fn list_memories(&self, scope_filter: Option<&str>) -> Result<Vec<Memory>> {
+        self.memory.list_active(scope_filter)
+    }
+
+    pub fn search_memories(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
+        self.memory.search(query, limit)
+    }
+
+    pub fn list_memory_candidates(&self) -> Result<Vec<MemoryCandidate>> {
+        self.memory.list_pending_candidates()
+    }
+
+    pub fn approve_memory_candidate(&self, id: &str) -> Result<Memory> {
+        self.memory.approve_candidate(id)
+    }
+
+    pub fn reject_memory_candidate(&self, id: &str) -> Result<()> {
+        self.memory.reject_candidate(id)
+    }
+
+    pub fn edit_and_approve_candidate(
+        &self,
+        id: &str,
+        edit: EditCandidateInput,
+    ) -> Result<Memory> {
+        self.memory.edit_and_approve_candidate(id, &edit)
+    }
+
+    pub fn create_memory(&self, input: CreateMemoryInput) -> Result<Memory> {
+        self.memory.insert(&input)
+    }
+
+    pub fn update_memory(&self, id: &str, input: UpdateMemoryInput) -> Result<Memory> {
+        self.memory.update(id, &input)
+    }
+
+    pub fn deactivate_memory(&self, id: &str) -> Result<()> {
+        self.memory.deactivate(id)
+    }
+
+    pub fn supersede_memory(&self, old_id: &str, new_id: &str) -> Result<()> {
+        self.memory.mark_superseded(old_id, new_id)
+    }
+
+    pub async fn extract_memory_candidates(&self) -> Result<Vec<MemoryCandidate>> {
+        let conversation = self.get_conversation();
+        if conversation.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let transcript: String = conversation
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let project_scope = self.config.memory.project_scope();
+        let prompt = build_extraction_prompt(
+            &transcript,
+            &project_scope,
+            self.config.memory.extraction_min_confidence,
+        );
+
+        let gen = self.config.generation.clone();
+        let mut model = self.model.lock().await;
+        let mut stream = model.generate_stream(GenerateParams {
+            prompt,
+            temperature: gen.temperature,
+            top_p: gen.top_p,
+            top_k: gen.top_k,
+            repeat_penalty: gen.repeat_penalty,
+            max_tokens: gen.max_tokens,
+            seed: gen.seed,
+            stop_sequences: gen.stop_sequences,
+        })?;
+
+        let mut response = String::new();
+        while let Some(event) = stream.next().await {
+            let event = event?;
+            response.push_str(&event.token);
+            if event.finished {
+                break;
+            }
+        }
+        drop(model);
+
+        let extracted = parse_extraction_response(&response)?;
+        let min_conf = self.config.memory.extraction_min_confidence;
+        let session = self.session_id();
+        let mut created = Vec::new();
+
+        for item in extracted {
+            if item.confidence < min_conf {
+                continue;
+            }
+            if self
+                .memory
+                .has_active_duplicate(&item.proposed_scope, &item.proposed_content)?
+            {
+                continue;
+            }
+            if self
+                .memory
+                .pending_candidate_exists(&item.proposed_scope, &item.proposed_content)?
+            {
+                continue;
+            }
+            let candidate = self.memory.insert_candidate(
+                item.proposed_type,
+                &item.proposed_scope,
+                &item.proposed_title,
+                &item.proposed_content,
+                item.importance,
+                item.confidence,
+                item.reason,
+                Some("conversation".into()),
+                Some(session.clone()),
+            )?;
+            created.push(candidate);
+        }
+
+        Ok(created)
     }
 }
 
@@ -366,6 +695,10 @@ pub struct DoctorCheck {
 pub struct DoctorReport {
     pub local_only: bool,
     pub checks: Vec<DoctorCheck>,
+}
+
+fn new_session_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 fn check_path(name: &str, path: &Path) -> DoctorCheck {

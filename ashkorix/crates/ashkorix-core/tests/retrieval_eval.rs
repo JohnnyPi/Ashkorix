@@ -80,6 +80,68 @@ mod retrieval_eval {
     }
 
     #[test]
+    fn heuristic_reranker_boosts_phase_heading() {
+        use ashkorix_core::chunking::types::Chunk;
+        use ashkorix_core::rag::types::RankedChunk;
+        use ashkorix_core::types::{ChunkId, CollectionId};
+
+        let make_chunk = |text: &str, title: &str, index: u32, score: f64| RankedChunk {
+            chunk: Chunk {
+                id: ChunkId(format!("id-{index}")),
+                document_id: DocumentId("d".into()),
+                collection_id: CollectionId("pool".into()),
+                text: text.to_string(),
+                start_offset: 0,
+                end_offset: text.len(),
+                page_number: None,
+                section_title: Some(title.into()),
+                row_sheet_info: None,
+                source_filename: "plan.md".into(),
+                content_hash: format!("hash-{index}"),
+                token_count: 10,
+                parent_section_id: None,
+                heading_path: Some(title.into()),
+                chunk_index: index,
+                prev_chunk_id: None,
+                next_chunk_id: None,
+                contextual_text: None,
+                table_id: None,
+                entity_tokens: None,
+            },
+            score,
+            source_type: "both".into(),
+            source_number: None,
+            rerank_score: None,
+            expanded_context: None,
+        };
+
+        let chunks = vec![
+            make_chunk(
+                "## 4. Phases\n\nEach phase lists what to build.",
+                "4. Phases",
+                4,
+                0.9,
+            ),
+            make_chunk(
+                "### Phase 1 — Vector foundation\n\n**Build.** Implement `vectormath`.",
+                "Phase 1 — Vector foundation (vectormath + embeddings)",
+                6,
+                0.7,
+            ),
+        ];
+        let reranked = HeuristicReranker::rerank("What is Phase 1?", chunks, 2).unwrap();
+        assert!(
+            reranked[0]
+                .chunk
+                .section_title
+                .as_deref()
+                .unwrap_or("")
+                .contains("Phase 1"),
+            "Phase 1 section should outrank generic phases overview"
+        );
+    }
+
+    #[test]
     fn heuristic_reranker_boosts_exact_match() {
         use ashkorix_core::chunking::types::Chunk;
         use ashkorix_core::rag::types::RankedChunk;

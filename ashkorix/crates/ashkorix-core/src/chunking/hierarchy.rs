@@ -1,4 +1,5 @@
 use crate::chunking::recursive::{merge_to_size, split_by_regex, window_chunk};
+use crate::chunking::util::estimate_tokens;
 use crate::chunking::types::Chunk;
 use crate::config::ChunkingConfig;
 use crate::documents::entities::extract_entities_from_text;
@@ -16,10 +17,6 @@ pub struct HeadingHierarchyChunker {
 impl HeadingHierarchyChunker {
     pub fn new(config: ChunkingConfig) -> Self {
         Self { config }
-    }
-
-    fn estimate_tokens(text: &str) -> u32 {
-        (text.len() / 4).max(1) as u32
     }
 
     fn max_chars(&self) -> usize {
@@ -116,7 +113,7 @@ impl HeadingHierarchyChunker {
                     short_id_from_hash(&document.content_hash),
                     short_id_from_hash(&format!("{table_id}{row_i}{content_hash}"))
                 ));
-                let token_count = Self::estimate_tokens(row_line);
+                let token_count = estimate_tokens(row_line);
                 let contextual_text = format!(
                     "Document: {doc_title}. Table: {}. Row: {row_line}",
                     caption.as_deref().unwrap_or("Table")
@@ -178,7 +175,7 @@ impl HeadingHierarchyChunker {
                     short_id_from_hash(&document.content_hash),
                     short_id_from_hash(&content_hash)
                 ));
-                let token_count = Self::estimate_tokens(&segment);
+                let token_count = estimate_tokens(&segment);
                 let mut chunk = Chunk {
                     id: id.clone(),
                     document_id: document.id.clone(),
@@ -248,7 +245,7 @@ impl HeadingHierarchyChunker {
                     row_sheet_info: None,
                     source_filename: document.original_filename.clone(),
                     content_hash,
-                    token_count: Self::estimate_tokens(&segment),
+                    token_count: estimate_tokens(&segment),
                     parent_section_id: section.map(|s| s.id.clone()),
                     heading_path: section.map(|s| s.heading_path.clone()),
                     chunk_index,

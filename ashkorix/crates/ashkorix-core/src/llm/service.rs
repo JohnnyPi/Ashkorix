@@ -1,5 +1,6 @@
 use crate::error::{AshkorixError, Result};
 use crate::llm::backend::shared_llama_backend;
+use crate::llm::gpu::resolve_gpu_layers;
 use crate::llm::chat_template::format_messages_with_model;
 use crate::traits::model::{
     ChatMessage, GenerateParams, LoadOptions, ModelInfo, TokenEvent,
@@ -30,6 +31,7 @@ pub struct LlamaModelService {
     chat_template: Option<LlamaChatTemplate>,
     cancel_flag: Arc<AtomicBool>,
     conversation: Mutex<Vec<ChatMessage>>,
+    n_threads: u32,
 }
 
 impl LlamaModelService {
@@ -42,6 +44,7 @@ impl LlamaModelService {
             chat_template: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             conversation: Mutex::new(Vec::new()),
+            n_threads: 4,
         })
     }
 
@@ -58,6 +61,11 @@ impl LlamaModelService {
     }
 
     pub fn format_conversation(&self) -> Result<String> {
+        let msgs = self.conversation.lock().clone();
+        self.format_messages(&msgs)
+    }
+
+    pub fn format_messages(&self, messages: &[ChatMessage]) -> Result<String> {
         let model = self
             .model
             .as_ref()
@@ -66,8 +74,7 @@ impl LlamaModelService {
             .chat_template
             .as_ref()
             .ok_or_else(|| AshkorixError::Model("no chat template available".into()))?;
-        let msgs = self.conversation.lock().clone();
-        format_messages_with_model(model, template, &msgs)
+        format_messages_with_model(model, template, messages)
     }
 }
 
@@ -76,7 +83,8 @@ impl ModelService for LlamaModelService {
     async fn load(&mut self, path: &Path, options: LoadOptions) -> Result<()> {
         self.unload().await?;
         let backend = shared_llama_backend()?;
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(options.n_gpu_layers);
+        let n_gpu_layers = resolve_gpu_layers(options.n_gpu_layers);
+        let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
         let model = LlamaModel::load_from_file(backend, path, &model_params)
             .map_err(|e| AshkorixError::Model(e.to_string()))?;
 
@@ -105,6 +113,7 @@ impl ModelService for LlamaModelService {
         });
         self.chat_template = Some(chat_template);
         self.model = Some(Arc::new(model));
+        self.n_threads = options.threads.max(1);
         Ok(())
     }
 
@@ -130,6 +139,7 @@ impl ModelService for LlamaModelService {
             .clone();
 
         let n_ctx = self.model_info.as_ref().map(|m| m.n_ctx).unwrap_or(4096);
+        let n_threads = self.n_threads;
         let cancel = self.cancel_flag.clone();
         cancel.store(false, Ordering::SeqCst);
 
@@ -149,6 +159,7 @@ impl ModelService for LlamaModelService {
                 &model,
                 &prompt,
                 n_ctx,
+                n_threads,
                 max_tokens,
                 temperature,
                 top_p,
@@ -188,6 +199,7 @@ fn run_generation(
     model: &LlamaModel,
     prompt: &str,
     n_ctx: u32,
+    n_threads: u32,
     max_tokens: u32,
     temperature: f32,
     top_p: f32,
@@ -205,7 +217,8 @@ fn run_generation(
     // when n_ctx is larger (e.g. 4096 context with ~3k prompt tokens).
     let ctx_params = LlamaContextParams::default()
         .with_n_ctx(Some(n_ctx_nz))
-        .with_n_batch(n_ctx);
+        .with_n_batch(n_ctx)
+        .with_n_threads(n_threads as i32);
     let mut ctx = model
         .new_context(backend, ctx_params)
         .map_err(|e| AshkorixError::Model(e.to_string()))?;
@@ -337,9 +350,3 @@ fn token_to_piece_bytes(model: &LlamaModel, token: LlamaToken) -> Result<Vec<u8>
     }
 }
 
-pub fn tokens_per_second(generated: u32, elapsed_ms: u128) -> f64 {
-    if elapsed_ms == 0 {
-        return 0.0;
-    }
-    generated as f64 / (elapsed_ms as f64 / 1000.0)
-}

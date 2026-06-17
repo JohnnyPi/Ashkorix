@@ -1,4 +1,5 @@
 use crate::chunking::types::Chunk;
+use crate::chunking::util::file_extension;
 use crate::error::{AshkorixError, Result};
 use crate::traits::LexicalIndex;
 use std::path::{Path, PathBuf};
@@ -162,7 +163,7 @@ impl LexicalIndex for TantivyLexicalIndex {
                 self.section_field => chunk.section_title.clone().unwrap_or_default(),
                 self.heading_path_field => chunk.heading_path.clone().unwrap_or_default(),
                 self.page_field => chunk.page_number.unwrap_or(0) as u64,
-                self.file_type_field => chunk.source_filename.clone(),
+                self.file_type_field => file_extension(&chunk.source_filename),
                 self.entity_field => chunk.entity_tokens.clone().unwrap_or_default(),
             ))
             .map_err(|e| AshkorixError::Index(e.to_string()))?;
@@ -196,6 +197,10 @@ impl LexicalIndex for TantivyLexicalIndex {
             }
         }
         Ok(results)
+    }
+
+    fn remove_chunk(&mut self, chunk_id: &str) -> Result<()> {
+        self.delete_chunk_id(chunk_id)
     }
 
     fn remove_collection(&mut self) -> Result<()> {

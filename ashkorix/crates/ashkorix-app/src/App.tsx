@@ -1,24 +1,28 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Layout } from "./components/Layout";
-import { ChatPage } from "./pages/ChatPage";
-import { ModelsPage } from "./pages/ModelsPage";
-import { DocumentsPage } from "./pages/DocumentsPage";
-import { SearchPage } from "./pages/SearchPage";
-import { SettingsPage } from "./pages/SettingsPage";
+import { resolvePageId } from "./routes";
 import "./App.css";
+
+function RouteGuard({ children }: { children: React.ReactNode }) {
+  const { pathname } = useLocation();
+  if (resolvePageId(pathname) === null) {
+    return <Navigate to="/" replace />;
+  }
+  return children;
+}
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route element={<Layout />}>
-          <Route index element={<ChatPage />} />
-          <Route path="models" element={<ModelsPage />} />
-          <Route path="documents" element={<DocumentsPage />} />
-          <Route path="search" element={<SearchPage />} />
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
+        <Route
+          path="*"
+          element={
+            <RouteGuard>
+              <Layout />
+            </RouteGuard>
+          }
+        />
       </Routes>
     </BrowserRouter>
   );

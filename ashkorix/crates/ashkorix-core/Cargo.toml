@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 description = "Ashkorix local RAG engine core"
 
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+
 [dependencies]
 tokio.workspace = true
 serde.workspace = true

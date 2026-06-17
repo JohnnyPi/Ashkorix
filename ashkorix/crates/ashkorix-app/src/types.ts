@@ -1,3 +1,9 @@
+export interface CudaStatus {
+  compiled: boolean;
+  available: boolean;
+  device_name: string | null;
+}
+
 export interface AshkorixConfig {
   data_dir: string;
   models_dir: string;
@@ -9,6 +15,7 @@ export interface AshkorixConfig {
   generation: GenerationConfig;
   chunking: ChunkingConfig;
   retrieval: RetrievalConfig;
+  memory: MemoryConfig;
 }
 
 export interface GenerationConfig {
@@ -33,6 +40,91 @@ export interface RetrievalConfig {
   max_query_variants: number;
   retrieval_context_budget_pct: number;
   candidate_pool_size: number;
+}
+
+export interface MemoryConfig {
+  enabled: boolean;
+  active_project: string;
+  max_injected: number;
+  min_confidence: number;
+  min_importance: number;
+  extraction_min_confidence: number;
+}
+
+export type MemoryType =
+  | "user_preference"
+  | "project_fact"
+  | "decision"
+  | "procedure";
+
+export type MemoryStatus = "active" | "inactive" | "superseded" | "deleted";
+
+export type CandidateStatus = "pending" | "approved" | "rejected" | "edited";
+
+export interface Memory {
+  id: string;
+  memory_type: MemoryType;
+  scope: string;
+  title: string;
+  content: string;
+  importance: number;
+  confidence: number;
+  status: MemoryStatus;
+  source_type: string | null;
+  source_ref: string | null;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+  supersedes_id: string | null;
+  metadata_json: string | null;
+}
+
+export interface MemoryCandidate {
+  id: string;
+  proposed_type: MemoryType;
+  proposed_scope: string;
+  proposed_title: string;
+  proposed_content: string;
+  importance: number;
+  confidence: number;
+  reason: string | null;
+  source_type: string | null;
+  source_ref: string | null;
+  created_at: string;
+  status: CandidateStatus;
+}
+
+export interface CreateMemoryInput {
+  memory_type: MemoryType;
+  scope: string;
+  title: string;
+  content: string;
+  importance: number;
+  confidence: number;
+  source_type?: string | null;
+  source_ref?: string | null;
+  supersedes_id?: string | null;
+  metadata_json?: string | null;
+}
+
+export interface UpdateMemoryInput {
+  memory_type?: MemoryType;
+  scope?: string;
+  title?: string;
+  content?: string;
+  importance?: number;
+  confidence?: number;
+  status?: MemoryStatus;
+  metadata_json?: string | null;
+}
+
+export interface EditCandidateInput {
+  proposed_type?: MemoryType;
+  proposed_scope?: string;
+  proposed_title?: string;
+  proposed_content?: string;
+  importance?: number;
+  confidence?: number;
 }
 
 export interface RetrievalFilters {
@@ -87,6 +179,9 @@ export interface TokenPayload {
   token: string;
   finished: boolean;
   tokens_generated: number;
+  citations?: Citation[];
+  uncited_warning?: boolean;
+  unsupported_claims?: UnsupportedClaim[];
 }
 
 export interface Document {
@@ -225,4 +320,4 @@ export type RetrievalMode =
   | "deep"
   | "corpus-map";
 
-export type PageId = "chat" | "models" | "documents" | "search" | "settings";
+export type PageId = "chat" | "models" | "documents" | "search" | "memory" | "settings";

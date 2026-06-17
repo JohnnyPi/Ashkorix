@@ -212,6 +212,14 @@ impl VectorIndex for UsearchVectorIndex {
         Ok(results)
     }
 
+    fn remove_chunk(&mut self, chunk_id: &str) -> Result<()> {
+        if let Some(key) = self.id_to_key.remove(chunk_id) {
+            self.key_to_id.remove(&key);
+            let _ = self.index.remove(key);
+        }
+        Ok(())
+    }
+
     fn remove_collection(&mut self) -> Result<()> {
         let usearch_path = self.usearch_path();
         if usearch_path.exists() {

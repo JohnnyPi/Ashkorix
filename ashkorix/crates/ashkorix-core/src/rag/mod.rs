@@ -6,7 +6,7 @@ pub mod retrieve;
 pub mod types;
 pub mod verify;
 
-pub use answer::RagAnswerService;
+pub use answer::{RagAnswerService, RagVerification};
 pub use prompt::DefaultPromptBuilder;
 pub use retrieve::HybridRetrievalService;
 pub use types::*;

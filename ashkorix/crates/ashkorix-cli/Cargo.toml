@@ -11,7 +11,7 @@ name = "ashkorix"
 path = "src/main.rs"
 
 [dependencies]
-ashkorix-core = { path = "../ashkorix-core" }
+ashkorix-core = { path = "../ashkorix-core", features = ["cuda"] }
 tokio.workspace = true
 clap.workspace = true
 toml.workspace = true

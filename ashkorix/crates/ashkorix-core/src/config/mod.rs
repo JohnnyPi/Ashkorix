@@ -30,6 +30,8 @@ pub struct AshkorixConfig {
     pub generation: GenerationConfig,
     pub chunking: ChunkingConfig,
     pub retrieval: RetrievalConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 impl Default for AshkorixConfig {
@@ -46,6 +48,7 @@ impl Default for AshkorixConfig {
             generation: GenerationConfig::default(),
             chunking: ChunkingConfig::default(),
             retrieval: RetrievalConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }

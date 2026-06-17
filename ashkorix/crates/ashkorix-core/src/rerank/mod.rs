@@ -1,5 +1,10 @@
+mod service;
+
 use crate::error::Result;
 use crate::rag::types::RankedChunk;
+pub use service::LlamaRerankerService;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct HeuristicReranker;
 
@@ -13,6 +18,12 @@ impl HeuristicReranker {
             let heading = chunk
                 .chunk
                 .heading_path
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase();
+            let section = chunk
+                .chunk
+                .section_title
                 .as_deref()
                 .unwrap_or("")
                 .to_lowercase();
@@ -34,6 +45,9 @@ impl HeuristicReranker {
                 if heading.contains(term) {
                     overlap += 0.5;
                 }
+                if section.contains(term) {
+                    overlap += 0.5;
+                }
                 if entity.contains(term) {
                     overlap += 0.75;
                 }
@@ -41,6 +55,18 @@ impl HeuristicReranker {
 
             if text_lower.contains(&query_lower) {
                 overlap += 2.0;
+            }
+
+            if let Ok(re) = regex::Regex::new(r"(?i)\bphase\s+\d+\b") {
+                if let Some(m) = re.find(query) {
+                    let phrase = m.as_str().to_lowercase();
+                    if heading.contains(&phrase)
+                        || section.contains(&phrase)
+                        || text_lower.contains(&phrase)
+                    {
+                        overlap += 5.0;
+                    }
+                }
             }
 
             let rrf = chunk.score;
@@ -59,26 +85,31 @@ impl HeuristicReranker {
 }
 
 pub struct CompositeReranker {
-    use_heuristic: bool,
+    model: Arc<Mutex<LlamaRerankerService>>,
 }
 
 impl CompositeReranker {
-    pub fn new(_reranker_model_loaded: bool) -> Self {
-        Self {
-            use_heuristic: true,
-        }
+    pub fn new(model: Arc<Mutex<LlamaRerankerService>>) -> Self {
+        Self { model }
     }
 
-    pub fn rerank(
+    pub async fn rerank(
         &self,
         query: &str,
         chunks: Vec<RankedChunk>,
         top_k: usize,
     ) -> Result<Vec<RankedChunk>> {
-        if self.use_heuristic {
-            HeuristicReranker::rerank(query, chunks, top_k)
-        } else {
-            Ok(chunks.into_iter().take(top_k).collect())
+        let service = self.model.lock().await;
+        if service.is_loaded() {
+            match service.rerank(query, chunks.clone(), top_k) {
+                Ok(ranked) => return Ok(ranked),
+                Err(e) => {
+                    tracing::warn!(
+                        "GGUF reranker failed ({e}); falling back to heuristic rerank"
+                    );
+                }
+            }
         }
+        HeuristicReranker::rerank(query, chunks, top_k)
     }
 }

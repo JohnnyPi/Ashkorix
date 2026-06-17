@@ -5,14 +5,21 @@ use crate::error::{AshkorixError, Result};
 use crate::traits::{EmbeddingService, LexicalIndex, VectorIndex};
 use crate::vectorstore::UsearchVectorIndex;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
+
+struct OpenIndexes {
+    lexical: crate::search::lexical::TantivyLexicalIndex,
+    vector: UsearchVectorIndex,
+    dimension: usize,
+}
 
 pub struct PoolIndexer {
     config: AshkorixConfig,
     store: Arc<DocumentStore>,
-    embedding: Arc<Mutex<LlamaEmbeddingService>>,
+    embedding: Arc<AsyncMutex<LlamaEmbeddingService>>,
     batch_size: usize,
+    indexes: Mutex<Option<OpenIndexes>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -30,14 +37,19 @@ impl PoolIndexer {
     pub fn new(
         config: AshkorixConfig,
         store: Arc<DocumentStore>,
-        embedding: Arc<Mutex<LlamaEmbeddingService>>,
+        embedding: Arc<AsyncMutex<LlamaEmbeddingService>>,
     ) -> Self {
         Self {
             config,
             store,
             embedding,
             batch_size: 32,
+            indexes: Mutex::new(None),
         }
+    }
+
+    pub fn invalidate_cache(&self) {
+        *self.indexes.lock().unwrap() = None;
     }
 
     fn index_paths(&self) -> (PathBuf, PathBuf) {
@@ -55,7 +67,50 @@ impl PoolIndexer {
             .unwrap_or_else(|| chunk.build_contextual_text(doc_title))
     }
 
+    pub fn with_indexes<R>(
+        &self,
+        dimension: usize,
+        f: impl FnOnce(
+            &mut crate::search::lexical::TantivyLexicalIndex,
+            &mut UsearchVectorIndex,
+        ) -> Result<R>,
+    ) -> Result<R> {
+        let mut guard = self.indexes.lock().unwrap();
+        let needs_open = guard
+            .as_ref()
+            .map(|cached| cached.dimension != dimension)
+            .unwrap_or(true);
+        if needs_open {
+            let (lex_path, vec_path) = self.index_paths();
+            *guard = Some(OpenIndexes {
+                lexical: crate::search::lexical::TantivyLexicalIndex::open(&lex_path)?,
+                vector: UsearchVectorIndex::open(&vec_path, dimension)?,
+                dimension,
+            });
+        }
+        let cached = guard.as_mut().unwrap();
+        f(&mut cached.lexical, &mut cached.vector)
+    }
+
+    pub fn remove_chunks(&self, chunk_ids: &[String], dimension: usize) -> Result<()> {
+        if chunk_ids.is_empty() || dimension == 0 {
+            return Ok(());
+        }
+        self.with_indexes(dimension, |lexical, vector| {
+            for chunk_id in chunk_ids {
+                lexical.remove_chunk(chunk_id)?;
+                vector.remove_chunk(chunk_id)?;
+            }
+            lexical.commit()?;
+            vector.save()?;
+            Ok(())
+        })?;
+        self.invalidate_cache();
+        Ok(())
+    }
+
     pub async fn build_index(&self) -> Result<IndexHealth> {
+        self.invalidate_cache();
         let chunks = self.store.list_pool_chunks()?;
         let dim = self.embedding.lock().await.dimension();
         if dim == 0 {
@@ -111,6 +166,7 @@ impl PoolIndexer {
         drop(vector);
         self.build_summaries()?;
         self.store.mark_pool_indexed()?;
+        self.invalidate_cache();
 
         self.health()
     }
@@ -180,6 +236,7 @@ impl PoolIndexer {
     }
 
     pub async fn rebuild_index(&self) -> Result<IndexHealth> {
+        self.invalidate_cache();
         let (lex_path, vec_path) = self.index_paths();
         if lex_path.exists() {
             std::fs::remove_dir_all(&lex_path)?;
@@ -259,7 +316,37 @@ impl PoolIndexer {
         })
     }
 
-    pub fn open_indexes(&self, dimension: usize) -> Result<(crate::search::lexical::TantivyLexicalIndex, UsearchVectorIndex)> {
+    pub fn take_open_indexes(
+        &self,
+        dimension: usize,
+    ) -> Result<(crate::search::lexical::TantivyLexicalIndex, UsearchVectorIndex)> {
+        let mut guard = self.indexes.lock().unwrap();
+        if let Some(cached) = guard.take() {
+            if cached.dimension == dimension {
+                return Ok((cached.lexical, cached.vector));
+            }
+        }
+        drop(guard);
+        self.open_indexes(dimension)
+    }
+
+    pub fn restore_open_indexes(
+        &self,
+        dimension: usize,
+        lexical: crate::search::lexical::TantivyLexicalIndex,
+        vector: UsearchVectorIndex,
+    ) {
+        *self.indexes.lock().unwrap() = Some(OpenIndexes {
+            lexical,
+            vector,
+            dimension,
+        });
+    }
+
+    pub fn open_indexes(
+        &self,
+        dimension: usize,
+    ) -> Result<(crate::search::lexical::TantivyLexicalIndex, UsearchVectorIndex)> {
         let (lex_path, vec_path) = self.index_paths();
         Ok((
             crate::search::lexical::TantivyLexicalIndex::open(&lex_path)?,
@@ -267,5 +354,3 @@ impl PoolIndexer {
         ))
     }
 }
-
-pub type CollectionIndexer = PoolIndexer;

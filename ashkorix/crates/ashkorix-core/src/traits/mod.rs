@@ -46,6 +46,7 @@ pub trait EmbeddingService: Send + Sync {
 pub trait VectorIndex: Send + Sync {
     fn upsert(&mut self, chunk_id: &str, vector: &[f32]) -> Result<()>;
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(String, f32)>>;
+    fn remove_chunk(&mut self, chunk_id: &str) -> Result<()>;
     fn remove_collection(&mut self) -> Result<()>;
     fn save(&self) -> Result<()>;
     fn len(&self) -> usize;
@@ -54,6 +55,7 @@ pub trait VectorIndex: Send + Sync {
 pub trait LexicalIndex: Send + Sync {
     fn index_chunk(&mut self, chunk: &Chunk) -> Result<()>;
     fn search(&self, query: &str, top_k: usize) -> Result<Vec<(String, f32)>>;
+    fn remove_chunk(&mut self, chunk_id: &str) -> Result<()>;
     fn remove_collection(&mut self) -> Result<()>;
     fn commit(&mut self) -> Result<()>;
     fn doc_count(&self) -> usize;
@@ -80,6 +82,7 @@ pub trait PromptBuilder: Send + Sync {
         question: &str,
         sources: &[crate::cite::types::SourceBlock],
         conversation: &[model::ChatMessage],
+        memories: &[crate::memory::types::Memory],
     ) -> String;
 }
 

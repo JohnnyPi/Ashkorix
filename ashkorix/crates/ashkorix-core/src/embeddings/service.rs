@@ -1,5 +1,6 @@
 use crate::error::{AshkorixError, Result};
 use crate::llm::backend::shared_llama_backend;
+use crate::llm::gpu::resolve_gpu_layers;
 use crate::traits::EmbeddingService;
 use async_trait::async_trait;
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -32,7 +33,7 @@ impl LlamaEmbeddingService {
 impl EmbeddingService for LlamaEmbeddingService {
     async fn load(&mut self, path: &Path) -> Result<()> {
         let backend = shared_llama_backend()?;
-        let model_params = LlamaModelParams::default();
+        let model_params = LlamaModelParams::default().with_n_gpu_layers(resolve_gpu_layers(0));
         let model = LlamaModel::load_from_file(backend, path, &model_params)
             .map_err(|e| AshkorixError::Model(e.to_string()))?;
 
@@ -63,12 +64,35 @@ impl EmbeddingService for LlamaEmbeddingService {
             .as_ref()
             .ok_or_else(|| AshkorixError::Model("embedding model not loaded".into()))?;
 
-        let mut results = Vec::with_capacity(texts.len());
-        for text in texts {
-            results.push(embed_text(model, text)?);
+        if texts.is_empty() {
+            return Ok(vec![]);
         }
-        Ok(results)
+        if texts.len() == 1 {
+            return Ok(vec![embed_text(model, &texts[0])?]);
+        }
+
+        embed_batch_with_shared_context(model, texts)
     }
+}
+
+fn embed_batch_with_shared_context(model: &LlamaModel, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    let backend = shared_llama_backend()?;
+    let n_ctx = NonZeroU32::new(EMBED_CTX_TOKENS)
+        .ok_or_else(|| AshkorixError::Model("invalid n_ctx".into()))?;
+    let ctx_params = LlamaContextParams::default()
+        .with_n_ctx(Some(n_ctx))
+        .with_n_batch(EMBED_CTX_TOKENS)
+        .with_n_ubatch(EMBED_CTX_TOKENS)
+        .with_embeddings(true);
+    let mut ctx = model
+        .new_context(backend, ctx_params)
+        .map_err(|e| AshkorixError::Model(e.to_string()))?;
+
+    let mut results = Vec::with_capacity(texts.len());
+    for text in texts {
+        results.push(embed_with_context(model, &mut ctx, text)?);
+    }
+    Ok(results)
 }
 
 fn embed_text(model: &LlamaModel, text: &str) -> Result<Vec<f32>> {
@@ -83,16 +107,23 @@ fn embed_text(model: &LlamaModel, text: &str) -> Result<Vec<f32>> {
     let mut ctx = model
         .new_context(backend, ctx_params)
         .map_err(|e| AshkorixError::Model(e.to_string()))?;
+    embed_with_context(model, &mut ctx, text)
+}
 
+fn embed_with_context(
+    model: &LlamaModel,
+    ctx: &mut llama_cpp_2::context::LlamaContext,
+    text: &str,
+) -> Result<Vec<f32>> {
+    let n_ctx = EMBED_CTX_TOKENS as usize;
     let mut tokens = model
         .str_to_token(text, AddBos::Always)
         .map_err(|e| AshkorixError::Model(e.to_string()))?;
     if tokens.is_empty() {
         return Err(AshkorixError::Model("text produced zero tokens".into()));
     }
-    let max_tokens = n_ctx.get() as usize;
-    if tokens.len() > max_tokens {
-        tokens.truncate(max_tokens);
+    if tokens.len() > n_ctx {
+        tokens.truncate(n_ctx);
     }
 
     let mut batch = LlamaBatch::new(tokens.len(), 1);

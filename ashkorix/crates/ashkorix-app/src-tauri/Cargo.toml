@@ -14,7 +14,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-ashkorix-core = { path = "../../ashkorix-core" }
+ashkorix-core = { path = "../../ashkorix-core", features = ["cuda"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"

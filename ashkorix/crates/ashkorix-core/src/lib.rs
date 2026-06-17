@@ -7,6 +7,7 @@ pub mod embeddings;
 pub mod error;
 pub mod extensions;
 pub mod llm;
+pub mod memory;
 pub mod pool;
 pub mod rag;
 pub mod rerank;
@@ -17,3 +18,4 @@ pub mod vectorstore;
 
 pub use app::AppState;
 pub use error::{AshkorixError, Result};
+pub use llm::{cuda_status, resolve_gpu_layers, CudaStatus};

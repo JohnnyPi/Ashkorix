@@ -62,3 +62,40 @@ impl Default for RetrievalConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    pub active_project: String,
+    pub max_injected: usize,
+    pub min_confidence: f64,
+    pub min_importance: f64,
+    pub extraction_min_confidence: f64,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            active_project: "ashkorix".into(),
+            max_injected: 8,
+            min_confidence: 0.75,
+            min_importance: 0.0,
+            extraction_min_confidence: 0.75,
+        }
+    }
+}
+
+impl MemoryConfig {
+    pub fn project_scope(&self) -> String {
+        format!("project:{}", self.active_project)
+    }
+
+    pub fn active_scopes(&self, session_id: &str) -> Vec<String> {
+        vec![
+            "global".into(),
+            self.project_scope(),
+            format!("conversation:{session_id}"),
+        ]
+    }
+}

@@ -15,12 +15,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::open_data_folder,
             commands::get_version,
+            commands::get_cuda_status,
             commands::get_config,
             commands::list_models,
             commands::load_model,
             commands::unload_model,
             commands::get_model_info,
             commands::chat_stream_start,
+            commands::rag_stream_start,
             commands::cancel_generation,
             commands::clear_conversation,
             commands::get_generation_settings,
@@ -37,6 +39,17 @@ pub fn run() {
             commands::doctor,
             commands::update_config,
             commands::save_conversation,
+            commands::list_memories,
+            commands::search_memories,
+            commands::list_memory_candidates,
+            commands::approve_memory_candidate,
+            commands::reject_memory_candidate,
+            commands::edit_and_approve_candidate,
+            commands::create_memory,
+            commands::update_memory,
+            commands::deactivate_memory,
+            commands::extract_memory_candidates,
+            commands::get_last_injected_memories,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");

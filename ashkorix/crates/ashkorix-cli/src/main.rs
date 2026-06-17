@@ -1,7 +1,7 @@
 use ashkorix_core::app::AppState;
 use ashkorix_core::config::discover_gguf_models;
+use ashkorix_core::memory::{CreateMemoryInput, MemoryType};
 use ashkorix_core::rag::types::{RetrievalFilters, RetrievalMode};
-use ashkorix_core::traits::model::ChatMessage;
 use ashkorix_core::traits::model::LoadOptions;
 use ashkorix_core::traits::ModelService;
 use clap::{Parser, Subcommand};
@@ -69,6 +69,10 @@ enum Commands {
         #[arg(long)]
         filter_section: Option<String>,
     },
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -92,6 +96,35 @@ enum IndexAction {
     Build,
     Rebuild,
     Health,
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    Inbox,
+    Approve { id: String },
+    Reject { id: String },
+    Extract {
+        #[arg(long)]
+        model: PathBuf,
+    },
+    Add {
+        #[arg(long)]
+        memory_type: String,
+        #[arg(long)]
+        scope: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        content: String,
+        #[arg(long, default_value = "0.75")]
+        importance: f64,
+        #[arg(long, default_value = "1.0")]
+        confidence: f64,
+    },
 }
 
 #[tokio::main]
@@ -148,10 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 println!();
-                state.model.lock().await.add_message(ChatMessage {
-                    role: "assistant".into(),
-                    content: assistant,
-                });
+                state.append_assistant_message(assistant);
             }
         }
         Commands::Generate { model, prompt } => {
@@ -195,7 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             DocumentsAction::Delete { id } => {
-                state.delete_document(&id)?;
+                state.delete_document(&id).await?;
                 println!("deleted {id}");
             }
         },
@@ -228,8 +258,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .retrieve(&query, RetrievalMode::from_str(&mode), vec![], filters)
                 .await?;
             for c in chunks {
+                let src = c
+                    .source_number
+                    .map(|n| format!("[Source {n}] "))
+                    .unwrap_or_default();
                 println!(
-                    "[{}] {} {} - score {:.4}{}",
+                    "{src}[{}] {} {} - score {:.4}{}",
                     c.source_type,
                     c.chunk.source_filename,
                     c.chunk.id.0,
@@ -238,9 +272,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|s| format!(" rerank={s:.4}"))
                         .unwrap_or_default()
                 );
+                if let Some(ref title) = c.chunk.section_title {
+                    println!("  section: {title}");
+                }
                 if let Some(ref path) = c.chunk.heading_path {
                     println!("  path: {path}");
                 }
+                let preview: String = c.chunk.text.chars().take(120).collect();
+                println!("  text: {preview}...");
             }
         }
         Commands::Ask {
@@ -282,6 +321,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(map) = answer.corpus_map {
                 println!("[corpus map] {} themes, {} entities", map.themes.len(), map.entities.len());
+            }
+        }
+        Commands::Memory { action } => match action {
+            MemoryAction::List { scope } => {
+                for m in state.list_memories(scope.as_deref())? {
+                    println!(
+                        "[{}] {} ({}) — {}",
+                        m.memory_type.as_str(),
+                        m.title,
+                        m.scope,
+                        m.content
+                    );
+                }
+            }
+            MemoryAction::Inbox => {
+                for c in state.list_memory_candidates()? {
+                    println!(
+                        "[pending] {} ({}) — {}",
+                        c.proposed_title,
+                        c.proposed_scope,
+                        c.proposed_content
+                    );
+                }
+            }
+            MemoryAction::Approve { id } => {
+                let m = state.approve_memory_candidate(&id)?;
+                println!("approved: {} — {}", m.id, m.title);
+            }
+            MemoryAction::Reject { id } => {
+                state.reject_memory_candidate(&id)?;
+                println!("rejected {id}");
+            }
+            MemoryAction::Extract { model } => {
+                state.load_model(model, LoadOptions::default()).await?;
+                let created = state.extract_memory_candidates().await?;
+                println!("proposed {} candidate(s)", created.len());
+                for c in created {
+                    println!("  - {}: {}", c.proposed_title, c.proposed_content);
+                }
+            }
+            MemoryAction::Add {
+                memory_type,
+                scope,
+                title,
+                content,
+                importance,
+                confidence,
+            } => {
+                let memory_type = MemoryType::from_str(&memory_type)
+                    .ok_or_else(|| format!("invalid memory type: {memory_type}"))?;
+                let m = state.create_memory(CreateMemoryInput {
+                    memory_type,
+                    scope,
+                    title,
+                    content,
+                    importance,
+                    confidence,
+                    source_type: Some("cli".into()),
+                    source_ref: None,
+                    supersedes_id: None,
+                    metadata_json: None,
+                })?;
+                println!("created {} — {}", m.id, m.title);
             }
         }
     }
