@@ -1,0 +1,28 @@
+# Secrets — never commit (HF tokens, API keys, etc.)
+Data/secrets.toml
+**/secrets.toml
+
+# Environment files with credentials
+.env
+.env.*
+!.env.example
+
+# Local runtime data (see Data/README.md)
+Data/**
+!Data/README.md
+!Data/**/.gitkeep
+
+# Model weights and large ML/runtime binaries
+*.gguf
+*.safetensors
+*.onnx
+*.dll
+*.lib
+
+# Build/cache artifacts
+.cache/
+**/build.log
+
+# SQLite WAL sidecar files
+*.db-wal
+*.db-shm
