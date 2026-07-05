@@ -1,0 +1,39 @@
+# Copy to config.toml and adjust paths for your machine.
+# Ashkorix also creates config.toml on first run if it is missing.
+
+data_dir = "Data"
+models_dir = "Data/models"
+# embedding_model_path = "Data/models/embeddings/nomic-embed-text-v1.5.Q8_0.gguf"
+# reranker_model_path = "Data/models/rerankers/bge-reranker-base-Q8_0.gguf"
+default_retrieval_mode = "balanced"
+log_level = "info"
+local_only = true
+
+[generation]
+temperature = 0.7
+top_p = 0.9
+top_k = 40
+repeat_penalty = 1.1
+max_tokens = 1024
+context_size = 8192
+gpu_layers = 0
+threads = 4
+seed = -1
+stop_sequences = []
+
+[chunking]
+max_tokens = 512
+overlap_tokens = 64
+
+[retrieval]
+max_query_variants = 3
+retrieval_context_budget_pct = 60
+candidate_pool_size = 50
+
+[memory]
+enabled = true
+active_project = "ashkorix"
+max_injected = 8
+min_confidence = 0.75
+min_importance = 0.0
+extraction_min_confidence = 0.75

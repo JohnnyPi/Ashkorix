@@ -10,6 +10,7 @@ Data/secrets.toml
 # Local runtime data (see Data/README.md)
 Data/**
 !Data/README.md
+!Data/config.toml.example
 !Data/**/.gitkeep
 
 # Model weights and large ML/runtime binaries

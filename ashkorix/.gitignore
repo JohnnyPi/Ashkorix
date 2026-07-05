@@ -9,4 +9,5 @@
 # Runtime data at workspace root (keep README + .gitkeep)
 ../Data/**
 !../Data/README.md
+!../Data/config.toml.example
 !../Data/**/.gitkeep
