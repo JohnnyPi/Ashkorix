@@ -1,4 +1,6 @@
+# ─────────────────────────────────────────────────────────────
 # Secrets — never commit (HF tokens, API keys, etc.)
+# ─────────────────────────────────────────────────────────────
 Data/secrets.toml
 **/secrets.toml
 
@@ -7,23 +9,72 @@ Data/secrets.toml
 .env.*
 !.env.example
 
-# Local runtime data (see Data/README.md)
-Data/**
-!Data/README.md
-!Data/config.toml.example
-!Data/**/.gitkeep
+# ─────────────────────────────────────────────────────────────
+# Canonical runtime data (root Data/, see Data/README.md)
+# Ignore everything under the root Data/ except tracked scaffolding.
+# Leading slash keeps this anchored to the repo root only.
+# ─────────────────────────────────────────────────────────────
+/Data/**
+!/Data/README.md
+!/Data/config.toml.example
+!/Data/**/.gitkeep
 
-# Model weights and large ML/runtime binaries
+# ─────────────────────────────────────────────────────────────
+# Regenerable build output & dependencies  (the big offenders)
+# ─────────────────────────────────────────────────────────────
+# Rust build output — any crate, any depth
+**/target/
+# Node / npm packages
+**/node_modules/
+# Python virtual environments (e.g. Data/tools/training-venv)
+**/venv/
+**/.venv/
+**/*-venv/
+__pycache__/
+*.py[cod]
+
+# ─────────────────────────────────────────────────────────────
+# Orphaned / duplicate runtime dirs found in the tree
+# ─────────────────────────────────────────────────────────────
+# The real workspace is ashkorix/ ; this root-level crates/ is a
+# stale runtime leftover. Remove this line if you ever add a real
+# crates/ workspace at the repo root.
+/crates/
+# The app writes a fresh Data/ next to wherever it launches from,
+# creating drifted config.toml + ashkorix.db copies. Ignore those.
+**/ashkorix-app/Data/
+
+# ─────────────────────────────────────────────────────────────
+# Model weights & large ML / runtime binaries
+# ─────────────────────────────────────────────────────────────
 *.gguf
 *.safetensors
 *.onnx
+*.pt
+*.bin
 *.dll
 *.lib
 
-# Build/cache artifacts
-.cache/
-**/build.log
-
-# SQLite WAL sidecar files
+# ─────────────────────────────────────────────────────────────
+# Databases (runtime).  If you ever need to track a seed/fixture
+# DB, add e.g.  !fixtures/seed.db  below this block.
+# ─────────────────────────────────────────────────────────────
+*.db
 *.db-wal
 *.db-shm
+
+# ─────────────────────────────────────────────────────────────
+# Caches & logs
+# ─────────────────────────────────────────────────────────────
+.cache/
+# Catches build.log and rolling logs like ashkorix.log.2026-07-14
+*.log*
+
+# ─────────────────────────────────────────────────────────────
+# OS / editor cruft
+# ─────────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
